@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Downloaded audio files
+*.mp3
+*.m4a
+*.wav
+*.ogg
+*.opus
+audio/
+
+# Transcript output
+transcripts/
+
+# URL batch files (may contain private links)
+urls.txt
+to-be-transcribed.txt
+yt_whisper_right_click_queue/to-be-transcribed.txt
+
+# Local shortcuts, model caches, and generated manifests
+*.lnk
+*.pt
+*.pth
+.cache/
+
+# Local shell/function snippets tied to one workstation
+shel_code.txt
+yttranscribe.txt
+yt_transcribe.function script.txt
