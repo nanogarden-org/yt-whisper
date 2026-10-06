@@ -36,6 +36,10 @@ Usage:
 
 from __future__ import annotations
 
+from transcript_identity import (configuration, output_stem, verified_existing,
+                                 atomic_write, write_manifest, finish_batch,
+                                 subtitle_time, digest, atomic_json)
+
 import argparse
 import hashlib
 import json
@@ -167,11 +171,7 @@ def require_ffmpeg() -> None:
 # ---------------------------------------------------------------------------
 
 def _srt_time(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int(round((seconds % 1) * 1000))
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    return subtitle_time(seconds)
 
 
 def _vtt_time(seconds: float) -> str:
@@ -439,10 +439,7 @@ def chunk_cache_path(cache_dir: Path, chunk_index: int) -> Path:
 
 def save_chunk_result(path: Path, result: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        json.dumps(result, ensure_ascii=False),
-        encoding="utf-8",
-    )
+    atomic_json(path, result)
 
 
 def load_chunk_result(path: Path) -> dict:
@@ -499,6 +496,17 @@ def transcribe_chunked(
     chunk_dir = work_dir / "chunks"
     cache_dir = work_dir / "chunk_results"
 
+    cache_identity = {"audio_sha256": digest(audio_path), "chunk_seconds": chunk_seconds,
+                      "language": language}
+    identity_path = work_dir / "chunk-input.json"
+    try:
+        previous = json.loads(identity_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = None
+    if previous != cache_identity:
+        shutil.rmtree(chunk_dir, ignore_errors=True)
+        shutil.rmtree(cache_dir, ignore_errors=True)
+        atomic_json(identity_path, cache_identity)
     chunks = split_audio(audio_path, chunk_dir, chunk_seconds)
     print(
         f"         Split into {len(chunks)} chunk(s) "
@@ -566,7 +574,7 @@ def transcribe_urls(
     audio_format: str,
     keep_video: bool,
     video_dir: Path | None,
-) -> None:
+) -> dict:
     try:
         import whisper
     except ImportError:
@@ -597,27 +605,29 @@ def transcribe_urls(
     work_root = output_dir / ".yt_whisper_work"
     work_root.mkdir(parents=True, exist_ok=True)
 
+    config = configuration("yt_whisper_chunked.py", model=model_name, language=language, output_format=output_format,
+                           keep_audio=keep_audio, audio_dir=str(audio_dir.resolve()) if audio_dir else None, chunk_minutes=chunk_minutes, chunking_enabled=chunking_enabled,
+                           audio_format=audio_format, keep_video=keep_video,
+                           video_dir=str(video_dir.resolve()) if video_dir else None)
+
     total_start = time.time()
     succeeded, skipped, failed = 0, 0, 0
     chunk_seconds = chunk_minutes * 60
 
     for idx, (video_url, raw_title) in enumerate(all_videos, 1):
         prefix = f"[{idx}/{len(all_videos)}]"
-        safe_title = safe_filename(raw_title)
-        dest = output_dir / f"{safe_title}.{output_format}"
+        stem = output_stem(video_url, config)
+        dest = output_dir / f"{stem}.{output_format}"
 
         print(f"{prefix} {raw_title}")
 
-        if skip_existing and dest.exists():
-            print("         SKIP (already transcribed)\n")
+        if skip_existing and verified_existing(dest, video_url, config):
+            print("         SKIP (configuration and output hashes verified)\n")
             skipped += 1
             continue
 
-        # One stable work directory per title. The short hash prevents two
-        # videos with identical titles from colliding.
-        import hashlib
-        url_hash = hashlib.sha1(video_url.encode("utf-8")).hexdigest()[:10]
-        video_work = work_root / f"{safe_title[:80]}__{url_hash}"
+        # Configuration changes get independent resume state.
+        video_work = work_root / stem
         video_work.mkdir(parents=True, exist_ok=True)
 
         print("         Downloading audio...")
@@ -692,7 +702,7 @@ def transcribe_urls(
                     **options,
                 )
 
-            WRITERS[output_format](result, dest)
+            atomic_write(WRITERS[output_format], result, dest)
 
             tr_elapsed = time.time() - tr_start
             lang_detected = result.get("language", "?")
@@ -701,7 +711,6 @@ def transcribe_urls(
                 f"| lang: {lang_detected}"
             )
             print(f"         -> {dest}\n")
-            succeeded += 1
 
             preserved_audio_path = None
             preserved_video_path = None
@@ -712,7 +721,7 @@ def transcribe_urls(
                 target_audio_dir = audio_dir or (output_dir / "audio")
                 target_audio_dir.mkdir(parents=True, exist_ok=True)
                 kept_audio = target_audio_dir / (
-                    f"{safe_title}{audio_path.suffix}"
+                    f"{stem}{audio_path.suffix}"
                 )
                 if kept_audio.resolve() != audio_path.resolve():
                     shutil.copy2(audio_path, kept_audio)
@@ -721,7 +730,7 @@ def transcribe_urls(
             if keep_video and video_path is not None:
                 target_video_dir = video_dir or (output_dir / "video")
                 target_video_dir.mkdir(parents=True, exist_ok=True)
-                kept_video = target_video_dir / f"{safe_title}.mp4"
+                kept_video = target_video_dir / f"{stem}.mp4"
                 if kept_video.resolve() != video_path.resolve():
                     shutil.copy2(video_path, kept_video)
                 preserved_video_path = kept_video
@@ -741,6 +750,9 @@ def transcribe_urls(
             )
             print(f"         Record -> {output_dir / f'{dest.stem}.record.json'}\n")
 
+            write_manifest(dest, video_url, raw_title, config,
+                           [p for p in (preserved_audio_path, preserved_video_path) if p is not None])
+            succeeded += 1
             clean_work_dir(video_work)
 
         except MemoryError:
@@ -779,6 +791,7 @@ def transcribe_urls(
     print(f"  Failed      : {failed}")
     print(f"  Output dir  : {output_dir}\n")
 
+    return finish_batch(output_dir, succeeded, skipped, failed)
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -943,7 +956,7 @@ def main() -> None:
         "\n"
     )
 
-    transcribe_urls(
+    summary = transcribe_urls(
         urls=urls,
         output_dir=output_dir,
         model_name=args.model,
@@ -959,6 +972,9 @@ def main() -> None:
         keep_video=keep_video,
         video_dir=video_dir,
     )
+
+    if summary["failed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

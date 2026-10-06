@@ -35,6 +35,10 @@ Usage:
 
 from __future__ import annotations
 
+from transcript_identity import (configuration, output_stem, verified_existing,
+                                 atomic_write, write_manifest, finish_batch,
+                                 subtitle_time)
+
 import argparse
 import os
 import re
@@ -74,11 +78,7 @@ def load_urls_from_file(path: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 def _srt_time(seconds: float) -> str:
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int(round((seconds % 1) * 1000))
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    return subtitle_time(seconds)
 
 
 def _vtt_time(seconds: float) -> str:
@@ -220,7 +220,7 @@ def transcribe_urls(
     keep_audio: bool,
     audio_dir: Path | None,
     verbose: bool,
-) -> None:
+) -> dict:
     try:
         import whisper
     except ImportError:
@@ -250,18 +250,21 @@ def transcribe_urls(
     output_dir.mkdir(parents=True, exist_ok=True)
     tmp_root = audio_dir or Path(tempfile.mkdtemp(prefix="yt_whisper_"))
 
+    config = configuration("yt_whisper.py", model=model_name, language=language, output_format=output_format,
+                           keep_audio=keep_audio, audio_dir=str(audio_dir.resolve()) if audio_dir else None)
+
     total_start = time.time()
     succeeded, skipped, failed = 0, 0, 0
 
     for idx, (video_url, raw_title) in enumerate(all_videos, 1):
         prefix = f"[{idx}/{len(all_videos)}]"
-        safe_title = safe_filename(raw_title)
-        dest = output_dir / f"{safe_title}.{output_format}"
+        stem = output_stem(video_url, config)
+        dest = output_dir / f"{stem}.{output_format}"
 
         print(f"{prefix} {raw_title}")
 
-        if skip_existing and dest.exists():
-            print(f"         SKIP (already transcribed)\n")
+        if skip_existing and verified_existing(dest, video_url, config):
+            print(f"         SKIP (configuration and output hashes verified)\n")
             skipped += 1
             continue
 
@@ -284,11 +287,12 @@ def transcribe_urls(
             if language:
                 options["language"] = language
             result = model.transcribe(str(audio_path), verbose=verbose, **options)
-            WRITERS[output_format](result, dest)
+            atomic_write(WRITERS[output_format], result, dest)
             tr_elapsed = time.time() - tr_start
             lang_detected = result.get("language", "?")
             print(f"         Done in {format_duration(tr_elapsed)} | lang: {lang_detected}")
             print(f"         -> {dest}\n")
+            write_manifest(dest, video_url, raw_title, config, [audio_path] if keep_audio else [])
             succeeded += 1
         except Exception as e:  # noqa: BLE001
             print(f"         ERROR transcribing: {e}\n", file=sys.stderr)
@@ -312,6 +316,7 @@ def transcribe_urls(
         except OSError:
             pass
 
+    return finish_batch(output_dir, succeeded, skipped, failed)
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -426,7 +431,7 @@ def main() -> None:
     print(f"Keep audio   : {keep_audio}")
     print(f"Skip existing: {args.skip_existing}\n")
 
-    transcribe_urls(
+    summary = transcribe_urls(
         urls=urls,
         output_dir=output_dir,
         model_name=args.model,
@@ -437,6 +442,9 @@ def main() -> None:
         audio_dir=audio_dir,
         verbose=args.verbose,
     )
+
+    if summary["failed"]:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
