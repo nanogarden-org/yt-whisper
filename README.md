@@ -1,6 +1,6 @@
 # yt-whisper
 
-Transcribe any YouTube video or playlist to text using OpenAI Whisper — **locally, with no API key and no cost.**
+Transcribe any YouTube video or playlist to text using OpenAI Whisper — **with local Whisper inference and no transcription API key.**
 
 One command. Paste a URL. Get a transcript.
 
@@ -20,7 +20,7 @@ Works on **any** YouTube video — even ones with no captions at all.
 ## Features
 
 - **Single video, full playlist, or batch file** — one URL or thousands
-- **100% local** — Whisper runs on your machine; no API key, no internet needed after setup, no audio uploaded anywhere
+- **Local inference** — Whisper transcribes on your machine. YouTube downloads require network access; initial model downloads may also use the network. The tool does not send audio to a transcription API.
 - **5 output formats** — `txt`, `srt`, `vtt`, `tsv`, `json`
 - **99 languages** — auto-detected or specify one for faster results
 - **6 Whisper model sizes** — from `tiny` (fast) to `large`/`turbo` (near-human accuracy)
@@ -211,7 +211,7 @@ Finished in 6m 20s
 
 - 🎙️ **Researchers** — transcribe interviews, lectures, or talks without paying for a transcription service
 - 📚 **Students** — get searchable transcripts of educational YouTube content
-- 📰 **Journalists** — transcribe sources and press conferences locally (nothing leaves your machine)
+- 📰 **Journalists** — transcribe sources and press conferences with local inference (YouTube requests still use the network)
 - 🎧 **Podcast listeners** — create transcripts of YouTube-hosted podcast episodes
 - 🌍 **Non-English speakers** — transcribe content in any of 99 supported languages
 - 🔒 **Privacy-first users** — your audio is never uploaded anywhere; Whisper runs entirely on your machine
@@ -238,3 +238,13 @@ Finished in 6m 20s
 ## Contributing
 
 Issues and PRs welcome. If a URL format isn't being handled, or you'd like to see a new feature (speaker diarization, translation mode, auto-chapter generation), open an issue.
+
+## Output identity and repeat runs
+
+Both CLI engines, including the GUI’s chunked engine, name transcripts by source ID and a processing-configuration digest. Titles are recorded in the manifest rather than used as identity. Model, language hint, output format, retention options, engine, and installed Whisper, yt-dlp and Torch versions affect that digest. Chunked jobs also include chunk and audio settings. A changed title does not create a new identity; different videos with identical titles remain separate.
+
+`--skip-existing` requires a matching `.manifest.json` and SHA-256 checks of the transcript and retained media. Older title-only transcripts are left intact and are not trusted as skip evidence. Moving outputs requires regenerating manifests because they reference local absolute paths. These checks establish local file consistency, not source authenticity or transcription accuracy. A source that changes under the same YouTube ID needs an explicit run without `--skip-existing`.
+
+`last-run.json` records succeeded, skipped and failed counts. Either CLI exits with status 1 when any resolved video fails; it still processes remaining videos. Chunk resume state is scoped by processing configuration and invalidated when downloaded audio, language or chunk size changes. Do not run simultaneous jobs against the same output directory.
+
+Run synthetic regression checks with `python -m unittest discover -s tests -v`. They do not download media or models. Windows and Linux CI exercise Python 3.11 and 3.12; these checks do not establish GPU performance, live YouTube compatibility, or readiness for Content Factory or Project Echidna integration.
